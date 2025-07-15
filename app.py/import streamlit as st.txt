@@ -1,0 +1,138 @@
+import streamlit as st
+import whois
+import tldextract
+import socket
+import requests
+from datetime import datetime
+from googlesearch import search
+
+# ---- Config ----
+SUSPICIOUS_TLDS = {"tk", "ml", "ga", "cf", "gq", "xyz", "top"}
+SUSPICIOUS_REGISTRARS = ["freenom", "dot.tk", "hostinger"]
+
+# ---- Utilities ----
+def extract_domain(url):
+    return tldextract.extract(url).registered_domain
+
+def get_whois_info(domain):
+    try:
+        w = whois.whois(domain)
+        created = w.creation_date
+        if isinstance(created, list):
+            created = created[0]
+        age_days = (datetime.now() - created).days if created else None
+        return {
+            "creation_date": str(created),
+            "domain_age_days": age_days,
+            "registrar": str(w.registrar).lower() if w.registrar else "Unknown"
+        }
+    except Exception as e:
+        return {"error": f"WHOIS lookup failed: {e}"}
+
+def get_ip(domain):
+    try:
+        return socket.gethostbyname(domain)
+    except:
+        return "Could not resolve IP"
+
+def check_redirects(url):
+    try:
+        r = requests.get(url, allow_redirects=True, timeout=10)
+        redirect_chain = [resp.url for resp in r.history] + [r.url]
+        return {
+            "is_redirected": len(redirect_chain) > 1,
+            "redirect_chain": redirect_chain,
+            "final_url": r.url
+        }
+    except Exception as e:
+        return {"error": f"Redirect check failed: {e}"}
+
+def check_google_index(domain):
+    try:
+        results = list(search(domain, num=5, stop=5, pause=1))
+        indexed = any(domain in r for r in results)
+        return {
+            "indexed": indexed,
+            "sample_results": results
+        }
+    except Exception as e:
+        return {"error": f"Google search failed: {e}"}
+
+def classify_url(info):
+    score = 0
+    reasons = []
+
+    if info.get("domain_age_days", 9999) < 60:
+        score += 1
+        reasons.append("Recently registered domain")
+
+    if extract_domain(info.get("original_url", "")) != extract_domain(info.get("final_url", "")):
+        score += 1
+        reasons.append("Redirects to different domain")
+
+    tld = tldextract.extract(info["original_url"]).suffix
+    if tld in SUSPICIOUS_TLDS:
+        score += 1
+        reasons.append(f"Suspicious TLD: .{tld}")
+
+    registrar = info.get("registrar", "")
+    if any(bad in registrar for bad in SUSPICIOUS_REGISTRARS):
+        score += 1
+        reasons.append(f"Suspicious registrar: {registrar}")
+
+    if not info.get("indexed", True):
+        score += 1
+        reasons.append("Not indexed by Google")
+
+    if "edu" in info["original_url"] and "phish" in info.get("final_url", ""):
+        score += 2
+        reasons.append("EDU phishing behavior")
+
+    if score >= 4:
+        classification = "Phishing URL"
+    elif score >= 2:
+        classification = "Suspicious URL"
+    else:
+        classification = "Normal URL"
+
+    return classification, reasons
+
+# ---- Streamlit UI ----
+st.set_page_config("Smarter Phishing Bot", "🔐")
+st.title("🔐 Smarter Phishing URL Analyzer")
+
+url = st.text_input("🔗 Enter a URL to analyze", placeholder="https://example.com")
+
+if st.button("Analyze"):
+    if not url.startswith("http"):
+        st.error("Please enter the full URL (including https://)")
+    else:
+        st.info("⏳ Running smart analysis...")
+        try:
+            original_domain = extract_domain(url)
+            whois_info = get_whois_info(original_domain)
+            ip = get_ip(original_domain)
+            redirect_info = check_redirects(url)
+            google_info = check_google_index(original_domain)
+
+            combined_info = {
+                "original_url": url,
+                "original_domain": original_domain,
+                "ip_address": ip,
+                **whois_info,
+                **redirect_info,
+                **google_info
+            }
+
+            classification, reasons = classify_url(combined_info)
+
+            st.success(f"✅ Classification: **{classification}**")
+            st.markdown("### 🔍 Reasoning:")
+            for r in reasons:
+                st.markdown(f"- {r}")
+
+            st.markdown("### 🧾 Full Report")
+            st.json(combined_info)
+
+        except Exception as e:
+            st.error(f"Something went wrong: {e}")
